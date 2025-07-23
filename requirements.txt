@@ -1,0 +1,9 @@
+livekit-agents[assemblyai,openai,aws,silero]
+SQLAlchemy
+pyodbc
+python-dotenv
+requests
+fastapi
+uvicorn[standard]
+pydantic
+flask
