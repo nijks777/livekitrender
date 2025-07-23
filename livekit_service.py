@@ -1,4 +1,4 @@
-﻿#!/usr/bin/env python3
+#!/usr/bin/env python3
 """
 AIRecruiters LiveKit Agent - VAD-ONLY IMPLEMENTATION WITH FLASK WRAPPER FOR AZURE
 ✅ Flask wrapper for Azure App Service compatibility
@@ -6,6 +6,7 @@ AIRecruiters LiveKit Agent - VAD-ONLY IMPLEMENTATION WITH FLASK WRAPPER FOR AZUR
 ✅ Simple and reliable approach using only VAD
 ✅ Proper VAD configuration based on official LiveKit docs
 ✅ Enhanced speech quality with faster, louder AI voice
+✅ Fixed database connection with pymssql support
 """
 
 # ============================================================================
@@ -60,6 +61,7 @@ import logging
 import os
 from datetime import datetime
 from typing import Optional
+# Removed pyodbc import - using pymssql instead
 
 # LiveKit imports
 from livekit import agents, rtc
@@ -125,7 +127,7 @@ logging.basicConfig(
 logger = logging.getLogger(__name__)
 
 # ============================================================================
-# DATABASE MODELS & SERVICE (KEEP YOUR EXISTING DATABASE CODE)
+# DATABASE MODELS & SERVICE (UPDATED WITH PYMSSQL SUPPORT)
 # ============================================================================
 
 class Base(DeclarativeBase):
@@ -176,40 +178,113 @@ class DatabaseService:
         logger.info("📊 Database service initialized")
     
     def _build_connection_string(self):
-        """Convert .NET connection string to SQLAlchemy format"""
+        """Build connection string with pymssql fallback support"""
         net_conn_str = Config.DATABASE_CONNECTION_STRING
         
-        if "Server=" in net_conn_str and "Database=" in net_conn_str:
+        # If already a valid SQLAlchemy connection string, try to convert to pymssql
+        if "mssql+pyodbc://" in net_conn_str:
+            logger.info("🔄 Converting pyodbc connection string to pymssql...")
+            
+            # Extract credentials from existing connection string
+            # Format: mssql+pyodbc://user:password@server:port/database?params
+            try:
+                # Parse the connection string
+                parts = net_conn_str.split("://")[1]  # Remove mssql+pyodbc://
+                credentials_and_server = parts.split("?")[0]  # Remove query parameters
+                
+                if "@" in credentials_and_server:
+                    credentials, server_and_db = credentials_and_server.split("@", 1)
+                    username, password = credentials.split(":", 1)
+                    
+                    if "/" in server_and_db:
+                        server_part, database = server_and_db.split("/", 1)
+                        server = server_part.split(":")[0]  # Remove port if present
+                    else:
+                        server = server_and_db
+                        database = "AIRECRUITER"
+                    
+                    # Build pymssql connection string
+                    conn_str = f"mssql+pymssql://{username}:{password}@{server}:1433/{database}?charset=utf8"
+                    logger.info("✅ Successfully converted to pymssql format")
+                    return conn_str
+                    
+            except Exception as e:
+                logger.warning(f"⚠️ Failed to parse connection string: {e}")
+                logger.info("🔄 Falling back to manual configuration...")
+        
+        # Manual configuration for known setup
+        if "airecruiter1.database.windows.net" in str(net_conn_str):
+            logger.info("🎯 Detected Azure SQL Server, using pymssql...")
+            username = "air"
+            password = "Conor2260@"
+            server = "airecruiter1.database.windows.net"
+            database = "AIRECRUITER"
+            
+            conn_str = f"mssql+pymssql://{username}:{password}@{server}:1433/{database}?charset=utf8"
+            logger.info("✅ Using pymssql for Azure SQL Server")
+            return conn_str
+        
+        # Handle .NET style connection strings
+        if "Server=" in str(net_conn_str) and "Database=" in str(net_conn_str):
+            logger.info("🔄 Converting .NET connection string...")
             parts = {}
-            for part in net_conn_str.split(';'):
+            for part in str(net_conn_str).split(';'):
                 if '=' in part:
                     key, value = part.split('=', 1)
                     parts[key.strip()] = value.strip()
             
             server = parts.get('Server', 'localhost')
             database = parts.get('Database', 'AIRECRUITER')
+            username = parts.get('User ID', '')
+            password = parts.get('Password', '')
             
-            if 'Trusted_Connection=True' in net_conn_str:
-                conn_str = f"mssql+pyodbc://@{server}/{database}?driver=ODBC+Driver+17+for+SQL+Server&trusted_connection=yes"
-            else:
-                username = parts.get('User ID', '')
-                password = parts.get('Password', '')
-                conn_str = f"mssql+pyodbc://{username}:{password}@{server}/{database}?driver=ODBC+Driver+17+for+SQL+Server"
-            
-            return conn_str
+            if username and password:
+                conn_str = f"mssql+pymssql://{username}:{password}@{server}:1433/{database}?charset=utf8"
+                logger.info("✅ Converted .NET connection string to pymssql")
+                return conn_str
         
+        # If all else fails, return the original
+        logger.warning("⚠️ Could not convert connection string, using original")
         return net_conn_str
     
     def test_connection(self):
-        """Test database connection"""
-        try:
-            with self.engine.connect() as conn:
-                result = conn.execute(text("SELECT 1"))
-                logger.info("✅ Database connection successful")
-                return True
-        except Exception as e:
-            logger.error(f"❌ Database connection failed: {e}")
-            return False
+        """Test database connection with better error handling"""
+        max_retries = 3
+        for attempt in range(max_retries):
+            try:
+                logger.info(f"🔌 Testing database connection (attempt {attempt + 1}/{max_retries})...")
+                
+                with self.engine.connect() as conn:
+                    result = conn.execute(text("SELECT 1 as test"))
+                    row = result.fetchone()
+                    if row and row[0] == 1:
+                        logger.info("✅ Database connection successful")
+                        return True
+                    
+            except Exception as e:
+                logger.error(f"❌ Database connection failed (attempt {attempt + 1}): {e}")
+                
+                # Provide helpful error messages
+                error_str = str(e).lower()
+                if "odbc driver" in error_str:
+                    logger.error("💡 ODBC Driver issue detected.")
+                    logger.error("💡 This version uses pymssql which should work without ODBC drivers.")
+                    logger.error("💡 Make sure pymssql==2.2.8 is in your requirements.txt")
+                elif "login failed" in error_str:
+                    logger.error("💡 Authentication failed. Check username/password in connection string.")
+                elif "server not found" in error_str or "name or service not known" in error_str:
+                    logger.error("💡 Server not found. Check server name and network connectivity.")
+                elif "timeout" in error_str:
+                    logger.error("💡 Connection timeout. Server might be overloaded or network issues.")
+                
+                if attempt < max_retries - 1:
+                    logger.info(f"⏳ Retrying in 2 seconds...")
+                    time.sleep(2)
+                else:
+                    logger.error("❌ All connection attempts failed")
+                    return False
+        
+        return False
     
     def get_interview(self, interview_id: str):
         """Get interview by ID"""
