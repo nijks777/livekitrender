@@ -7,3 +7,4 @@ fastapi
 uvicorn[standard]
 pydantic
 flask
+pymssql==2.2.8
